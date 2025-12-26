@@ -1,0 +1,1 @@
+/usr/bin/c++  -O3 -fopenmp -msse4.2 -g CMakeFiles/hpc_app.dir/src/algorithm.cpp.o CMakeFiles/hpc_app.dir/src/main.cpp.o CMakeFiles/hpc_app.dir/src/network.cpp.o -o hpc_app 

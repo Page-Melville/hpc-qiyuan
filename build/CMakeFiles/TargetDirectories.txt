@@ -1,0 +1,3 @@
+/home/page/HPC_Project/build/CMakeFiles/hpc_app.dir
+/home/page/HPC_Project/build/CMakeFiles/edit_cache.dir
+/home/page/HPC_Project/build/CMakeFiles/rebuild_cache.dir
