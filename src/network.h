@@ -22,7 +22,9 @@ void send_float(int fd, float val);
 float recv_float(int fd);
 
 // 发送/接收 大数组 (用于 Sort 结果)
-// 核心难点：处理大数据分片传输
+// 协议：先发送 int32_t(length)（网络字节序），随后紧跟 length 个 float 原始字节
+// recv_data 会先读取长度并按长度接收数据；若接收缓冲小于远端发送长度，会丢弃多余字节以保持流同步
+// 该模块会为 socket 设置超时并在发送/接收过程中分块与重试以提高鲁棒性
 void send_data(int fd, const float* data, int len);
 void recv_data(int fd, float* data, int len);
 

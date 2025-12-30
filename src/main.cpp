@@ -7,6 +7,9 @@
 #include "algorithm.h"
 #include "network.h"
 
+// 可配置的本地数据长度（默认为全局一半），可通过命令行 --small 启用较小调试值
+int g_local_len = DATANUM / 2;
+
 // 计时辅助
 double get_elapsed_ms(struct timespec start, struct timespec end) {
     return (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
@@ -31,8 +34,9 @@ void final_merge(const float* partA, int lenA, const float* partB, int lenB, flo
 void run_worker(int port) {
     int sock = start_server(port);
 
-    int half_len = DATANUM / 2;
-    std::cout << "[Worker] Allocating memory..." << std::endl;
+    extern int g_local_len;
+    int half_len = g_local_len;
+    std::cout << "[Worker] Allocating memory... local_len=" << half_len << std::endl;
     std::vector<float> local_data(half_len);
     init_data(local_data.data(), half_len, half_len); // Worker 偏移量
 
@@ -89,7 +93,8 @@ void run_worker(int port) {
 // Master逻辑
 void run_master(std::string ip, int port) {
     std::cout << "=== Running as MASTER ===" << std::endl;
-    int half_len = DATANUM / 2;
+    extern int g_local_len;
+    int half_len = g_local_len;
     std::vector<float> local_data(half_len);
     init_data(local_data.data(), half_len, 0);
 
@@ -130,7 +135,7 @@ void run_master(std::string ip, int port) {
     send_cmd(sock, CMD_MAX);
     float m1 = max(local_data.data(), half_len);
     float m2 = recv_float(sock);
-    float total_m = (transform(m1) > transform(m2)) ? m1 : m2;
+    float total_m = (m1 > m2) ? m1 : m2;
     clock_gettime(CLOCK_MONOTONIC, &end);
     t_basic_max = get_elapsed_ms(start, end);
     std::cout << "Time: " << t_basic_max << " ms | Result: " << total_m << std::endl;
@@ -171,7 +176,7 @@ void run_master(std::string ip, int port) {
     send_cmd(sock, CMD_MAX_SPEEDUP); // 发送新命令
     float fm1 = maxSpeedUp(local_data.data(), half_len); // 快速
     float fm2 = recv_float(sock);
-    float f_total_m = (transform(fm1) > transform(fm2)) ? fm1 : fm2;
+    float f_total_m = (fm1 > fm2) ? fm1 : fm2;
     clock_gettime(CLOCK_MONOTONIC, &end);
     t_speed_max = get_elapsed_ms(start, end);
     std::cout << "Time: " << t_speed_max << " ms | Result: " << f_total_m << std::endl;
@@ -198,8 +203,8 @@ void run_master(std::string ip, int port) {
     std::cout << "SUM    | " << std::setw(10) << t_basic_sum << " | " << std::setw(12) << t_speed_sum << " | " << std::fixed << std::setprecision(2) << t_basic_sum / t_speed_sum << "x" << std::endl;
     std::cout << "MAX    | " << std::setw(10) << t_basic_max << " | " << std::setw(12) << t_speed_max << " | " << std::fixed << std::setprecision(2) << t_basic_max / t_speed_max << "x" << std::endl;
     std::cout << "SORT   | " << std::setw(10) << t_basic_sort << " | " << std::setw(12) << t_speed_sort << " | " << std::fixed << std::setprecision(2) << t_basic_sort / t_speed_sort << "x" << std::endl;
-    int all_sum = t_basic_sum + t_basic_max + t_basic_sort;
-    int speed_sum = t_speed_sum + t_speed_max + t_speed_sort;
+    double all_sum = t_basic_sum + t_basic_max + t_basic_sort;
+    double speed_sum = t_speed_sum + t_speed_max + t_speed_sort;
     std::cout << "TOTAL   | " << std::setw(10) << all_sum << " | " << std::setw(12) << speed_sum << " | " << std::fixed << std::setprecision(2) << all_sum / speed_sum << "x" << std::endl;
     close_socket(sock);
 }
@@ -213,6 +218,7 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--worker") == 0) mode = "worker";
         else if (strncmp(argv[i], "--ip=", 5) == 0) ip = argv[i] + 5;
         else if (strncmp(argv[i], "--port=", 7) == 0) port = std::atoi(argv[i] + 7);
+        else if (strcmp(argv[i], "--small") == 0) g_local_len = 16384; // 方便调试的小规模模式
     }
 
     if (mode == "worker") run_worker(port);

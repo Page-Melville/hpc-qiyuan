@@ -5,6 +5,12 @@
 #include <sys/socket.h> // socket, bind, listen...
 #include <arpa/inet.h>  // inet_addr
 #include <netinet/in.h>
+#include <errno.h>
+#include <chrono>
+#include <thread>
+#include <algorithm>
+#include <vector>
+#include <vector>
 
 // 辅助宏：检查 Socket 错误
 void check_error(int res, const char* msg) {
@@ -14,17 +20,45 @@ void check_error(int res, const char* msg) {
     }
 }
 
+// 配置 socket 超时（秒）
+static void set_socket_timeout(int fd, int seconds) {
+    struct timeval tv;
+    tv.tv_sec = seconds;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+}
+
 // 循环发送，确保字节已发送
 void send_all(int fd, const void* buffer, size_t length) {
     const char* ptr = static_cast<const char*>(buffer);
     size_t remaining = length;
+    const size_t CHUNK = 64 * 1024; // 64KB 分块
+    int retry_count = 0;
+    const int MAX_RETRY = 100;
     while (remaining > 0) {
-        ssize_t sent = send(fd, ptr, remaining, 0);
-        if (sent <= 0) {
+        size_t to_send = std::min(remaining, CHUNK);
+#ifdef MSG_NOSIGNAL
+        ssize_t sent = send(fd, ptr, to_send, MSG_NOSIGNAL);
+#else
+        ssize_t sent = send(fd, ptr, to_send, 0);
+#endif
+        if (sent < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (++retry_count > MAX_RETRY) check_error(-1, "Send failed (EAGAIN)");
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
             check_error(-1, "Send failed");
+        } else if (sent == 0) {
+            if (++retry_count > MAX_RETRY) check_error(-1, "Send failed (sent 0)");
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
         }
         ptr += sent;
         remaining -= sent;
+        retry_count = 0;
     }
 }
 
@@ -32,13 +66,26 @@ void send_all(int fd, const void* buffer, size_t length) {
 void recv_all(int fd, void* buffer, size_t length) {
     char* ptr = static_cast<char*>(buffer);
     size_t remaining = length;
+    const size_t CHUNK = 64 * 1024;
+    int retry_count = 0;
+    const int MAX_RETRY = 100;
     while (remaining > 0) {
-        ssize_t received = recv(fd, ptr, remaining, 0);
-        if (received <= 0) {
+        size_t to_recv = std::min(remaining, CHUNK);
+        ssize_t received = recv(fd, ptr, to_recv, 0);
+        if (received < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (++retry_count > MAX_RETRY) check_error(-1, "Recv failed (EAGAIN)");
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
             check_error(-1, "Recv failed (Connection closed?)");
+        } else if (received == 0) {
+            check_error(-1, "Recv failed (peer closed connection)");
         }
         ptr += received;
         remaining -= received;
+        retry_count = 0;
     }
 }
 
@@ -65,6 +112,8 @@ int start_server(int port) {
     int new_socket = accept(server_fd, nullptr, nullptr);
     check_error(new_socket, "Accept failed");
     
+    // 为连接设置合理超时，避免长时间阻塞
+    set_socket_timeout(new_socket, 30);
     std::cout << "[Network] Master connected!" << std::endl;
     
     return new_socket;
@@ -86,12 +135,21 @@ int connect_to_worker(std::string ip, int port) {
     }
 
     std::cout << "[Network] Connecting to " << ip << ":" << port << "..." << std::endl;
-    // 尝试连接，如果 Worker 没开，此处会失败
+    // 尝试连接，如果 Worker 没开，此处会失败，最多重试若干次
+    const int MAX_RETRIES = 60;
+    int attempts = 0;
     while (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
-        std::cout << "  Retrying in 1s..." << std::endl;
-        sleep(1);
+        ++attempts;
+        if (attempts >= MAX_RETRIES) {
+            std::cerr << "[Network] connect failed after " << attempts << " attempts." << std::endl;
+            check_error(-1, "Connect failed");
+        }
+        std::cout << "  Retrying in 1s... (" << attempts << ")" << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     
+    // 连接建立后设置超时
+    set_socket_timeout(sock, 30);
     std::cout << "[Network] Connected to Worker!" << std::endl;
     return sock;
 }
@@ -119,12 +177,35 @@ float recv_float(int fd) {
 }
 
 void send_data(int fd, const float* data, int len) {
-    // 发送 huge array
-    send_all(fd, data, len * sizeof(float));
+    // 发送长度前缀（网络字节序），随后发送原始浮点数据
+    int32_t net_len = htonl(len);
+    send_all(fd, &net_len, sizeof(net_len));
+    send_all(fd, data, (size_t)len * sizeof(float));
 }
 
 void recv_data(int fd, float* data, int len) {
-    recv_all(fd, data, len * sizeof(float));
+    // 先接收长度前缀
+    int32_t net_len = 0;
+    recv_all(fd, &net_len, sizeof(net_len));
+    int32_t remote_len = ntohl(net_len);
+    if (remote_len <= 0) {
+        std::cerr << "[Network] recv_data: invalid remote_len=" << remote_len << std::endl;
+        exit(1);
+    }
+
+    if (remote_len != len) {
+        std::cerr << "[Network] recv_data: expected len=" << len << " but remote sent=" << remote_len << ", will adjust read." << std::endl;
+    }
+
+    int to_read = std::min(remote_len, len);
+    recv_all(fd, data, (size_t)to_read * sizeof(float));
+
+    // 如果远端发送更多数据，消耗剩余字节以保持流同步
+    if (remote_len > len) {
+        size_t remaining = (size_t)(remote_len - len) * sizeof(float);
+        std::vector<char> tmp(remaining);
+        recv_all(fd, tmp.data(), remaining);
+    }
 }
 
 void close_socket(int fd) {

@@ -2,29 +2,12 @@
 #include <iostream>
 #include <omp.h> // 必须引入 OpenMP 头文件
 
-// 基于 MurmurHash3 的混淆算法
-inline float get_pseudo_random(size_t index) {
-    unsigned int x = (unsigned int)index;
-    x ^= x >> 16;
-    x *= 0x85ebca6b;
-    x ^= x >> 13;
-    x *= 0xc2b2ae35;
-    x ^= x >> 16;
-    
-    // x 现在是一个乱序的整数
-    // 我们把它映射到 [1.0, 1001.0] 的浮点数范围
-    // 注意：必须保证 > 0，因为后面要算 log(sqrt(x))
-    return (x % 10000) / 10.0f + 1.0f;
-}
-
-// === 数据初始化 (修改版) ===
+// === 数据初始化 ===
+// 按作业要求：每台机器独立生成其区间内的线性数据，值域无重叠
+// data[i] = (i + 1 + offset)
 void init_data(float* data, int len, int offset) {
-    // OpenMP 并行填充
-    #pragma omp parallel for
-    for (size_t i = 0; i < len; ++i) {
-        // 使用全局索引 (i + offset) 作为种子
-        // 这样 Master 和 Worker 生成的数据既随机，又不会重复
-        data[i] = get_pseudo_random(i + offset);
+    for (int i = 0; i < len; ++i) {
+        data[i] = static_cast<float>(i + 1 + offset);
     }
 }
 
@@ -86,9 +69,13 @@ float sort(const float data[], const int len, float result[]) {
     for (int i = 0; i < len; ++i) result[i] = data[i];
     
     // 2. 排序
-    float* temp = new float[len];
-    merge_sort_recursive(result, 0, len - 1, temp);
-    delete[] temp;
+    try {
+        std::vector<float> temp(len);
+        merge_sort_recursive(result, 0, len - 1, temp.data());
+    } catch (const std::bad_alloc& e) {
+        std::cerr << "[Algorithm] sort: memory allocation failed for temp: " << e.what() << std::endl;
+        exit(1);
+    }
     
     return 0.0f;
 }
@@ -135,17 +122,19 @@ static void merge_sort_parallel(float* arr, int l, int r, float* temp) {
         int m = l + (r - l) / 2;
 
         // 创建两个任务，分别处理左右两边
-        #pragma omp task shared(arr, temp)
+        #pragma omp task shared(arr)
         merge_sort_parallel(arr, l, m, temp);
 
-        #pragma omp task shared(arr, temp)
+        #pragma omp task shared(arr)
         merge_sort_parallel(arr, m + 1, r, temp);
 
         // 等待两个子任务完成
         #pragma omp taskwait
-        
-        // 合并结果 (这步依然是串行的，但这已经足够快了)
-        merge(arr, l, m, r, temp);
+
+        // 为本次合并分配本地临时缓冲，避免多个任务并发写入同一 temp（竞态）
+        int merge_len = r - l + 1;
+        std::vector<float> local_temp(merge_len);
+        merge(arr, l, m, r, local_temp.data());
     }
 }
 
@@ -154,18 +143,21 @@ float sortSpeedUp(const float data[], const int len, float result[]) {
     #pragma omp parallel for
     for (int i = 0; i < len; ++i) result[i] = data[i];
 
-    float* temp = new float[len];
+    try {
+        std::vector<float> temp(len);
 
-    // 2. 启动并行区域
-    #pragma omp parallel
-    {
-        // 只有主线程开始第一个任务，后续任务由递归产生
-        #pragma omp single
+        // 2. 启动并行区域
+        #pragma omp parallel
         {
-            merge_sort_parallel(result, 0, len - 1, temp);
+            // 只有主线程开始第一个任务，后续任务由递归产生
+            #pragma omp single
+            {
+                merge_sort_parallel(result, 0, len - 1, temp.data());
+            }
         }
+    } catch (const std::bad_alloc& e) {
+        std::cerr << "[Algorithm] sortSpeedUp: memory allocation failed for temp: " << e.what() << std::endl;
+        exit(1);
     }
-
-    delete[] temp;
     return 0.0f;
 }
