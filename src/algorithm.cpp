@@ -2,12 +2,29 @@
 #include <iostream>
 #include <omp.h> // 必须引入 OpenMP 头文件
 
-// 数据初始化
+// 基于 MurmurHash3 的混淆算法
+inline float get_pseudo_random(size_t index) {
+    unsigned int x = (unsigned int)index;
+    x ^= x >> 16;
+    x *= 0x85ebca6b;
+    x ^= x >> 13;
+    x *= 0xc2b2ae35;
+    x ^= x >> 16;
+    
+    // x 现在是一个乱序的整数
+    // 我们把它映射到 [1.0, 1001.0] 的浮点数范围
+    // 注意：必须保证 > 0，因为后面要算 log(sqrt(x))
+    return (x % 10000) / 10.0f + 1.0f;
+}
+
+// === 数据初始化 (修改版) ===
 void init_data(float* data, int len, int offset) {
-    // 并行初始化也是个好主意，不过作业主要考察计算部分
+    // OpenMP 并行填充，速度飞快
     #pragma omp parallel for
     for (size_t i = 0; i < len; ++i) {
-        data[i] = static_cast<float>(i + 1 + offset);
+        // 使用全局索引 (i + offset) 作为种子
+        // 这样 Master 和 Worker 生成的数据既随机，又不会重复
+        data[i] = get_pseudo_random(i + offset);
     }
 }
 
