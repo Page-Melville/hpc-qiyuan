@@ -19,7 +19,7 @@ inline float get_pseudo_random(size_t index) {
 
 // === 数据初始化 (修改版) ===
 void init_data(float* data, int len, int offset) {
-    // OpenMP 并行填充，速度飞快
+    // OpenMP 并行填充
     #pragma omp parallel for
     for (size_t i = 0; i < len; ++i) {
         // 使用全局索引 (i + offset) 作为种子

@@ -1,0 +1,64 @@
+# ==========================
+# 1. 编译构建目录 (最重要的)
+# ==========================
+# 我们通常在 build 目录下运行 cmake，这些全是临时文件
+build/
+bin/
+lib/
+
+# ==========================
+# 2. CMake 产生的临时文件
+# ==========================
+# 防止你不小心在根目录运行了 cmake 产生的垃圾
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CTestTestfile.cmake
+*.cmake
+# ⚠️ 重要：千万不要忽略 CMakeLists.txt，这是你的工程文件！
+!CMakeLists.txt
+
+# ==========================
+# 3. 编译产生的二进制文件
+# ==========================
+# C++ 编译中间产物
+*.o
+*.obj
+
+# 静态库和动态库
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# 可执行文件 (Windows/Linux)
+*.exe
+*.out
+*.app
+
+# === [特定] 你的项目可执行文件 ===
+hpc_app
+
+# ==========================
+# 4. 编辑器/IDE 配置文件夹
+# ==========================
+# VS Code 配置 (如果你不想把你的个人设置推送到仓库)
+.vscode/
+
+# CLion / IntelliJ IDEA
+.idea/
+cmake-build-*/
+
+# Visual Studio
+.vs/
+
+# ==========================
+# 5. 操作系统产生的垃圾文件
+# ==========================
+.DS_Store
+Thumbs.db
+
+hpc_app

@@ -198,7 +198,9 @@ void run_master(std::string ip, int port) {
     std::cout << "SUM    | " << std::setw(10) << t_basic_sum << " | " << std::setw(12) << t_speed_sum << " | " << std::fixed << std::setprecision(2) << t_basic_sum / t_speed_sum << "x" << std::endl;
     std::cout << "MAX    | " << std::setw(10) << t_basic_max << " | " << std::setw(12) << t_speed_max << " | " << std::fixed << std::setprecision(2) << t_basic_max / t_speed_max << "x" << std::endl;
     std::cout << "SORT   | " << std::setw(10) << t_basic_sort << " | " << std::setw(12) << t_speed_sort << " | " << std::fixed << std::setprecision(2) << t_basic_sort / t_speed_sort << "x" << std::endl;
-    
+    int all_sum = t_basic_sum + t_basic_max + t_basic_sort;
+    int speed_sum = t_speed_sum + t_speed_max + t_speed_sort;
+    std::cout << "TOTAL   | " << std::setw(10) << all_sum << " | " << std::setw(12) << speed_sum << " | " << std::fixed << std::setprecision(2) << all_sum / speed_sum << "x" << std::endl;
     close_socket(sock);
 }
 
