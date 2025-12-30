@@ -20,20 +20,24 @@ void check_error(int res, const char* msg) {
     }
 }
 
-// 配置 socket 超时（秒）
-static void set_socket_timeout(int fd, int seconds) {
+// 配置 socket 超时（秒）并调整缓冲区
+static void set_socket_timeout_and_buffers(int fd, int seconds) {
     struct timeval tv;
     tv.tv_sec = seconds;
     tv.tv_usec = 0;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+    // 提高 socket 缓冲区，减少内核拷贝与上下文切换
+    int buf = 4 * 1024 * 1024; // 4MB
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
 }
 
 // 循环发送，确保字节已发送
 void send_all(int fd, const void* buffer, size_t length) {
     const char* ptr = static_cast<const char*>(buffer);
     size_t remaining = length;
-    const size_t CHUNK = 64 * 1024; // 64KB 分块
+    const size_t CHUNK = 1024 * 1024; // 1MB 分块
     int retry_count = 0;
     const int MAX_RETRY = 100;
     while (remaining > 0) {
@@ -112,8 +116,8 @@ int start_server(int port) {
     int new_socket = accept(server_fd, nullptr, nullptr);
     check_error(new_socket, "Accept failed");
     
-    // 为连接设置合理超时，避免长时间阻塞
-    set_socket_timeout(new_socket, 30);
+    // 为连接设置合理超时与较大缓冲区，避免长时间阻塞并提高吞吐
+    set_socket_timeout_and_buffers(new_socket, 30);
     std::cout << "[Network] Master connected!" << std::endl;
     
     return new_socket;
@@ -148,8 +152,8 @@ int connect_to_worker(std::string ip, int port) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     
-    // 连接建立后设置超时
-    set_socket_timeout(sock, 30);
+    // 连接建立后设置超时与缓冲区
+    set_socket_timeout_and_buffers(sock, 30);
     std::cout << "[Network] Connected to Worker!" << std::endl;
     return sock;
 }
@@ -177,13 +181,51 @@ float recv_float(int fd) {
 }
 
 void send_data(int fd, const float* data, int len) {
-    // 发送长度前缀（网络字节序），随后发送原始浮点数据
+    using namespace std::chrono;
+    auto t0 = high_resolution_clock::now();
+
+    // 发送长度前缀（网络字节序）
     int32_t net_len = htonl(len);
     send_all(fd, &net_len, sizeof(net_len));
-    send_all(fd, data, (size_t)len * sizeof(float));
+
+    // 分块发送数据并显示进度条
+    size_t total_bytes = (size_t)len * sizeof(float);
+    const size_t CHUNK = 1024 * 1024; // 1MB
+    size_t sent_bytes = 0;
+    const int BAR_WIDTH = 50;
+    while (sent_bytes < total_bytes) {
+        size_t to_send = std::min(CHUNK, total_bytes - sent_bytes);
+#ifdef MSG_NOSIGNAL
+        ssize_t s = send(fd, reinterpret_cast<const char*>(data) + sent_bytes, to_send, MSG_NOSIGNAL);
+#else
+        ssize_t s = send(fd, reinterpret_cast<const char*>(data) + sent_bytes, to_send, 0);
+#endif
+        if (s < 0) {
+            if (errno == EINTR) continue;
+            check_error(-1, "send_data: send failed");
+        }
+        sent_bytes += (size_t)s;
+
+        // 打印进度条（覆盖行）
+        double progress = (double)sent_bytes / (double)total_bytes;
+        int pos = (int)(BAR_WIDTH * progress);
+        std::cout << "[Network] Sending: [";
+        for (int i = 0; i < BAR_WIDTH; ++i) std::cout << (i < pos ? '=' : (i == pos ? '>' : ' '));
+        std::cout << "] " << int(progress * 100.0) << "% (" << (sent_bytes / (1024*1024)) << " MB/" << (total_bytes / (1024*1024)) << " MB)\r" << std::flush;
+    }
+    std::cout << std::endl;
+
+    auto t1 = high_resolution_clock::now();
+    double ms = duration<double, std::milli>(t1 - t0).count();
+    double mb = total_bytes / (1024.0 * 1024.0);
+    double bw = ms > 0 ? mb / (ms / 1000.0) : 0.0;
+    std::cout << "[Network] send_data: sent " << len << " floats (" << mb << " MB) in " << ms << " ms, " << bw << " MB/s" << std::endl;
 }
 
 void recv_data(int fd, float* data, int len) {
+    using namespace std::chrono;
+    auto t0 = high_resolution_clock::now();
+
     // 先接收长度前缀
     int32_t net_len = 0;
     recv_all(fd, &net_len, sizeof(net_len));
@@ -198,7 +240,29 @@ void recv_data(int fd, float* data, int len) {
     }
 
     int to_read = std::min(remote_len, len);
-    recv_all(fd, data, (size_t)to_read * sizeof(float));
+    size_t total_bytes = (size_t)to_read * sizeof(float);
+    const size_t CHUNK = 1024 * 1024; // 1MB
+    size_t recvd_bytes = 0;
+    const int BAR_WIDTH = 50;
+    while (recvd_bytes < total_bytes) {
+        size_t to_recv = std::min(CHUNK, total_bytes - recvd_bytes);
+        ssize_t r = recv(fd, reinterpret_cast<char*>(data) + recvd_bytes, to_recv, 0);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            check_error(-1, "recv_data: recv failed");
+        }
+        if (r == 0) {
+            check_error(-1, "recv_data: peer closed");
+        }
+        recvd_bytes += (size_t)r;
+
+        double progress = (double)recvd_bytes / (double)total_bytes;
+        int pos = (int)(BAR_WIDTH * progress);
+        std::cout << "[Network] Receiving: [";
+        for (int i = 0; i < BAR_WIDTH; ++i) std::cout << (i < pos ? '=' : (i == pos ? '>' : ' '));
+        std::cout << "] " << int(progress * 100.0) << "% (" << (recvd_bytes / (1024*1024)) << " MB/" << (total_bytes / (1024*1024)) << " MB)\r" << std::flush;
+    }
+    std::cout << std::endl;
 
     // 如果远端发送更多数据，消耗剩余字节以保持流同步
     if (remote_len > len) {
@@ -206,6 +270,12 @@ void recv_data(int fd, float* data, int len) {
         std::vector<char> tmp(remaining);
         recv_all(fd, tmp.data(), remaining);
     }
+
+    auto t1 = high_resolution_clock::now();
+    double ms = duration<double, std::milli>(t1 - t0).count();
+    double mb = total_bytes / (1024.0 * 1024.0);
+    double bw = ms > 0 ? mb / (ms / 1000.0) : 0.0;
+    std::cout << "[Network] recv_data: recv " << to_read << " floats (" << mb << " MB) in " << ms << " ms, " << bw << " MB/s" << std::endl;
 }
 
 void close_socket(int fd) {
